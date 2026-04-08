@@ -1,4 +1,5 @@
 ---
+<<<<<<< HEAD
 title: Portfolio Risk Advisor
 emoji: 📈
 colorFrom: blue
@@ -237,3 +238,14 @@ This means:
 | `HF_TOKEN` | ✅ | — | Hugging Face / API key |
 | `API_BASE_URL` | ❌ | `https://router.huggingface.co/v1` | LLM API endpoint |
 | `MODEL_NAME` | ❌ | `Qwen/Qwen2.5-72B-Instruct` | Model identifier |
+=======
+title: Portfolio Risk Env
+emoji: 📈
+colorFrom: yellow
+colorTo: gray
+sdk: docker
+pinned: false
+---
+
+Check out the configuration reference at https://huggingface.co/docs/hub/spaces-config-reference
+>>>>>>> 3d3a0c5 (initial commit)
