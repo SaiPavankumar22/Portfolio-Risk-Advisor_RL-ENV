@@ -1,0 +1,13 @@
+name: portfolio-risk-advisor
+version: "1.0.0"
+description: "An RL environment where an AI agent manages and rebalances a stock portfolio under risk constraints."
+tags: [openenv, finance, portfolio, risk-management]
+tasks:
+  - name: allocation_check
+    difficulty: easy
+  - name: risk_rebalancing
+    difficulty: medium
+  - name: stress_test_optimization
+    difficulty: hard
+action_space: text
+observation_space: structured
