@@ -145,7 +145,7 @@ curl -X POST "http://localhost:7860/step" \
 
 ```bash
 # Build
-docker build -t portfolio-risk-env -f server/Dockerfile .
+docker build -t portfolio-risk-env .
 
 # Run
 docker run -p 7860:7860 portfolio-risk-env
