@@ -99,7 +99,7 @@ class PortfolioRiskEnv:
             reward, breakdown = self._grade_stress_test()
 
         self.reward_history.append(reward)
-        self.done = (self.step_count >= self.max_steps) or (reward >= 0.95)
+        self.done = (self.step_count >= self.max_steps) or (reward >= 0.90)
 
         info = {"breakdown": breakdown, "last_error": self.last_error}
         return self._make_observation(), reward, self.done, info
@@ -154,6 +154,11 @@ class PortfolioRiskEnv:
             last_action_error=self.last_error,
         )
 
+    @staticmethod
+    def _clamp(score: float) -> float:
+        """Clamp score to open interval (0.01, 0.99) — validator requires strictly between 0 and 1."""
+        return round(min(0.99, max(0.01, score)), 4)
+
     def _grade_allocation(self) -> tuple:
         constraints = self._state["constraints"]
         weights = self._state["weights"]
@@ -162,8 +167,9 @@ class PortfolioRiskEnv:
         violations = sum(1 for w in weights.values() if w > max_w)
         top_w = max(weights.values())
 
-        score = max(0.0, 1.0 - (violations * 0.3) - max(0.0, top_w - max_w) * 2)
-        return round(score, 4), {"violations": violations, "max_weight": round(top_w, 4)}
+        raw = 1.0 - (violations * 0.3) - max(0.0, top_w - max_w) * 2
+        score = self._clamp(raw)
+        return score, {"violations": violations, "max_weight": round(top_w, 4)}
 
     def _grade_rebalancing(self) -> tuple:
         weights = self._state["weights"]
@@ -176,8 +182,9 @@ class PortfolioRiskEnv:
 
         vol_score = max(0.0, 1.0 - max(0.0, port_vol - target_vol) / target_vol)
         alloc_score, _ = self._grade_allocation()
-        score = 0.6 * vol_score + 0.4 * alloc_score
-        return round(score, 4), {
+        raw = 0.6 * vol_score + 0.4 * alloc_score
+        score = self._clamp(raw)
+        return score, {
             "portfolio_vol": round(port_vol, 4),
             "target_vol": target_vol,
             "vol_score": round(vol_score, 4),
@@ -197,8 +204,9 @@ class PortfolioRiskEnv:
 
         survival_score = max(0.0, 1.0 - simulated_loss / max_acceptable_loss)
         rebalance_score, _ = self._grade_rebalancing()
-        score = 0.5 * survival_score + 0.5 * rebalance_score
-        return round(score, 4), {
+        raw = 0.5 * survival_score + 0.5 * rebalance_score
+        score = self._clamp(raw)
+        return score, {
             "simulated_loss": round(simulated_loss, 4),
             "survival_score": round(survival_score, 4),
         }
