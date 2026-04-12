@@ -213,8 +213,8 @@ def on_reset(task: str, state: dict):
         make_risk_chart(obs),
         None,                        # reward chart (empty at start)
         f"[RESET] Task={task}\n",    # log
-        gr.update(choices=tickers, value=tickers[0]),  # ticker dropdown
-        gr.update(interactive=True),  # step button
+        gr.Dropdown(choices=tickers, value=tickers[0]),
+        gr.Button(interactive=True),
     )
 
 
@@ -229,10 +229,10 @@ def on_step(
     obs: Optional[PortfolioObservation] = state.get("obs")
 
     if env is None or obs is None:
-        return (state,) + (gr.update(),) * 9
+        return (state,) + (gr.skip(),) * 9
 
     if state.get("done", False):
-        return (state,) + (gr.update(),) * 9
+        return (state,) + (gr.skip(),) * 9
 
     action = PortfolioAction(
         action_type=action_type,
@@ -269,8 +269,8 @@ def on_step(
         make_risk_chart(obs),
         make_reward_chart(state["rewards"]),
         full_log,
-        gr.update(choices=tickers, value=tickers[0] if tickers else None),
-        gr.update(interactive=not done),
+        gr.Dropdown(choices=tickers, value=tickers[0] if tickers else None),
+        gr.Button(interactive=not done),
     )
 
 

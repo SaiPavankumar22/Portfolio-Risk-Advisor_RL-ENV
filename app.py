@@ -2,8 +2,7 @@
 app.py
 ======
 FastAPI server exposing the OpenEnv API endpoints AND a Gradio interactive
-UI mounted at /ui. The root / redirects to /ui so HF Spaces shows the
-beautiful Gradio interface by default.
+UI mounted at the root /. HF Spaces serves the Gradio interface directly.
 
 OpenEnv API endpoints (used by validators and agents):
     POST /reset?task=<name>
@@ -26,7 +25,7 @@ import matplotlib.pyplot as plt
 import uvicorn
 import gradio as gr
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse
 
 from models import PortfolioRiskAction, PortfolioRiskObservation
 from env import PortfolioRiskEnv, PortfolioAction
@@ -183,18 +182,20 @@ def portfolio_plot() -> JSONResponse:
     return JSONResponse(content={"image_base64": img_b64, "format": "png"})
 
 
-@app.get("/", include_in_schema=False)
-def root():
-    return RedirectResponse(url="/ui")
-
-
 try:
     from gradio_ui import create_demo
     _demo = create_demo()
-    gr.mount_gradio_app(app, _demo, path="/ui")
+    gr.mount_gradio_app(app, _demo, path="/")
 except Exception as _e:
     import sys
-    print(f"[WARNING] Gradio UI could not be loaded: {_e}", file=sys.stderr)
+    print(f"[WARNING] Gradio UI could not be loaded: {_e}", file=sys.stderr, flush=True)
+
+    @app.get("/", include_in_schema=False)
+    def root():
+        return JSONResponse(
+            {"error": f"Gradio UI failed to load: {_e}"},
+            status_code=500,
+        )
 
 
 if __name__ == "__main__":
