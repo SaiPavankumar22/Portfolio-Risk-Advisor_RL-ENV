@@ -1,35 +1,25 @@
-ARG BASE_IMAGE=python:3.11-slim
-FROM ${BASE_IMAGE} AS builder
+FROM python:3.11-slim
+
+# System deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends git curl && \
-    rm -rf /var/lib/apt/lists/*
-
-COPY server/requirements.txt /app/requirements.txt
-
+# Install Python dependencies first (layer cache)
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# ---- Final stage ----
-FROM ${BASE_IMAGE}
+# Copy application code
+COPY . .
 
-WORKDIR /app
-
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl && \
-    rm -rf /var/lib/apt/lists/*
-
-COPY --from=builder /usr/local/lib/python3.11 /usr/local/lib/python3.11
-COPY --from=builder /usr/local/bin /usr/local/bin
-
-COPY . /app
-
-ENV PYTHONUNBUFFERED=1
-
+# Expose port required by HF Spaces
 EXPOSE 7860
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+# Health-check so HF Spaces marks the container as Running
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
     CMD curl -f http://localhost:7860/health || exit 1
 
-CMD ["python", "-m", "uvicorn", "server.app:app", "--host", "0.0.0.0", "--port", "7860"]
+# Start the FastAPI server
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "7860"]

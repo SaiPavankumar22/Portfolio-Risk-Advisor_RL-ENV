@@ -1,3 +1,19 @@
+"""
+Inference Script — Portfolio Risk Advisor
+=========================================
+Runs a model against all four tasks and emits structured stdout logs.
+
+STDOUT FORMAT (mandatory):
+    [START] task=<n> env=<benchmark> model=<model>
+    [STEP]  step=<n> action=<str> reward=<0.00> done=<true|false> error=<msg|null>
+    [END]   success=<true|false> steps=<n> score=<0.00> rewards=<r1,r2,...>
+
+Environment variables:
+    HF_TOKEN      (required) Hugging Face / API key
+    API_BASE_URL  (optional) LLM endpoint  [default: HuggingFace router]
+    MODEL_NAME    (optional) Model id       [default: Qwen/Qwen2.5-72B-Instruct]
+"""
+
 import os
 import json
 import random
@@ -7,11 +23,10 @@ from openai import OpenAI
 
 from env import PortfolioRiskEnv, PortfolioAction, PortfolioObservation
 
-# ── Deterministic behaviour ────────────────────────────────────────────────────
 random.seed(42)
 np.random.seed(42)
 
-# ── Environment variables ──────────────────────────────────────────────────────
+# Configuration
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME   = os.getenv("MODEL_NAME",   "Qwen/Qwen2.5-72B-Instruct")
 HF_TOKEN     = os.getenv("HF_TOKEN")
@@ -22,132 +37,152 @@ if not HF_TOKEN:
 client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
 
 BENCHMARK = "portfolio_risk_env"
-TASKS     = ["allocation_check", "risk_rebalancing", "stress_test_optimization"]
+TASKS     = [
+    "allocation_check",
+    "risk_rebalancing",
+    "stress_test_optimization",
+    "regime_shift_adaptation",
+]
 
-# ── Stricter system prompt ─────────────────────────────────────────────────────
-SYSTEM_PROMPT = """You are a strict quantitative portfolio optimizer.
+# LLM System prompt
+SYSTEM_PROMPT = """You are a strict quantitative portfolio risk manager.
 
-Return ONLY a single valid JSON object — no markdown, no prose, no explanation outside the JSON.
+Return ONLY a single valid JSON object — no markdown, no prose, no extra text.
 
-Hard constraints you must respect:
-- target_weight MUST be between 0.0 and 0.35 (the max_single_weight cap)
-- ticker MUST be one of the tickers listed in the portfolio state
-- Fix the largest weight violation first; then the next largest
-- For risk_rebalancing: also reduce weights of assets whose volatility pushes portfolio_vol above 0.25
-- For stress_test_optimization: additionally reduce assets with vol > 0.30
-- Never output invalid JSON; if unsure return the hold format
+Hard rules:
+- target_weight MUST be between 0.01 and the max_single_weight constraint (usually 0.30–0.35)
+- ticker MUST be one of the tickers listed in holdings
+- Fix the single largest weight violation first
+- For risk_rebalancing: also reduce the asset with the highest volatility × weight contribution
+- For stress_test_optimization: reduce assets with vol > 0.30 to minimise correlated crash losses
+- For regime_shift_adaptation:
+    * In normal regime: diversify and keep vol low, anticipating a possible crisis
+    * In crisis regime: aggressively reduce high-vol, high-correlation positions; spread weights evenly
+- Always mention the specific constraint or risk driver in your reasoning
+- Never output invalid JSON
 
-Valid output formats (choose one):
-{"action_type": "rebalance", "ticker": "AAPL", "target_weight": 0.20, "reasoning": "Over max_single_weight cap"}
-{"action_type": "hold", "reasoning": "All constraints satisfied"}"""
+Valid output formats:
+{"action_type": "rebalance", "ticker": "AAPL", "target_weight": 0.20, "reasoning": "AAPL exceeds 35% weight cap; reducing to manage concentration risk"}
+{"action_type": "hold", "reasoning": "All weight and volatility constraints are satisfied; portfolio is compliant"}"""
 
 
-# ── Helper: check whether the current observation is fully compliant ───────────
 def _is_compliant(obs: PortfolioObservation) -> bool:
-    """Return True only when EVERY constraint is already satisfied."""
+    """Check if observation meets all constraints."""
+    w       = obs.holdings
+    v       = obs.volatilities
+    c       = obs.correlations
     max_w   = obs.constraints.get("max_single_weight", 0.35)
     max_vol = obs.constraints.get("max_portfolio_vol",  0.25)
 
-    # Weight cap
-    if any(w > max_w for w in obs.holdings.values()):
+    if any(wt > max_w for wt in w.values()):
         return False
 
-    # Portfolio volatility (simplified diagonal)
-    port_vol = sum(
-        obs.holdings[t] ** 2 * obs.volatilities[t] ** 2
-        for t in obs.holdings
-    ) ** 0.5
+    # Full covariance vol
+    tickers  = list(w.keys())
+    port_var = sum(w[i] * w[j] * v[i] * v[j] * c[i][j] for i in tickers for j in tickers)
+    port_vol = max(0.0, port_var) ** 0.5
     if port_vol > max_vol:
         return False
 
-    # Stress-test task: penalise high-vol exposure
     if obs.task == "stress_test_optimization":
-        simulated_loss = sum(
-            obs.holdings[t] * obs.volatilities[t] * 1.5
-            for t in obs.holdings
-            if obs.volatilities[t] > 0.30
-        )
-        if simulated_loss > 0.15:
+        if sum(w[t] for t in w if v[t] > 0.30) > 0.40:
+            return False
+
+    if obs.task == "regime_shift_adaptation" and obs.regime == "crisis":
+        crisis_target = obs.constraints.get("crisis_vol_target", 0.40)
+        if port_vol > crisis_target:
             return False
 
     return True
 
 
-# ── Helper: rule-based fallback (smart, not passive) ──────────────────────────
+# ── Rule-based fallback ────────────────────────────────────────────────────────
+
 def _fallback_policy(obs: PortfolioObservation) -> PortfolioAction:
-    """
-    Deterministic fix for the worst constraint violation.
-    Called when LLM output is missing, unparseable, or invalid.
-    Priority order:
-      1. Weight cap violation  → rebalance worst offender to max_single_weight
-      2. High-vol exposure     → reduce highest-vol asset (stress task)
-      3. Portfolio vol too high→ reduce the highest-vol*weight asset
-      4. Truly compliant       → hold
-    """
+    """Deterministic fix for constraint violations."""
+    w       = obs.holdings
+    v       = obs.volatilities
+    c       = obs.correlations
+    tickers = list(w.keys())
     max_w   = obs.constraints.get("max_single_weight", 0.35)
     max_vol = obs.constraints.get("max_portfolio_vol",  0.25)
 
-    # 1. Fix the worst weight violation
-    violators = {t: w for t, w in obs.holdings.items() if w > max_w}
+    # Priority 1: Weight cap violation
+    violators = {t: wt for t, wt in w.items() if wt > max_w}
     if violators:
         worst = max(violators, key=lambda t: violators[t])
         return PortfolioAction(
             action_type="rebalance",
             ticker=worst,
             target_weight=max_w,
-            reasoning=f"fallback: {worst} weight {violators[worst]:.3f} exceeds cap {max_w}",
+            reasoning=(
+                f"fallback: {worst} weight {violators[worst]:.3f} exceeds "
+                f"max_single_weight cap {max_w}; rebalancing to reduce concentration risk"
+            ),
         )
 
-    # 2. Stress task: cut the biggest high-vol position
+    # 2. Crisis regime: cut highest correlation × weight exposure
+    if obs.task == "regime_shift_adaptation" and obs.regime == "crisis":
+        avg_c = {t: sum(c[t][t2] * w[t2] for t2 in tickers) for t in tickers}
+        riskiest = max(avg_c, key=lambda t: avg_c[t] * w[t])
+        new_w = round(max(0.01, min(max_w, w[riskiest] * 0.5)), 4)
+        return PortfolioAction(
+            action_type="rebalance",
+            ticker=riskiest,
+            target_weight=new_w,
+            reasoning=(
+                f"fallback crisis: cut {riskiest} (high correlation exposure "
+                f"{avg_c[riskiest]:.2f}); reducing exposure to correlated crash risk"
+            ),
+        )
+
+    # 3. Stress task: halve the worst high-vol position
     if obs.task == "stress_test_optimization":
-        high_vol = {t: obs.volatilities[t] for t in obs.holdings if obs.volatilities[t] > 0.30}
+        high_vol = {t: v[t] for t in tickers if v[t] > 0.30}
         if high_vol:
-            riskiest = max(high_vol, key=lambda t: obs.holdings[t] * high_vol[t])
-            new_w = round(obs.holdings[riskiest] * 0.5, 4)  # halve it
-            new_w = max(0.01, min(max_w, new_w))
+            riskiest = max(high_vol, key=lambda t: w[t] * high_vol[t])
+            new_w = round(max(0.01, min(max_w, w[riskiest] * 0.5)), 4)
             return PortfolioAction(
                 action_type="rebalance",
                 ticker=riskiest,
                 target_weight=new_w,
-                reasoning=f"fallback: cut high-vol {riskiest} (vol={high_vol[riskiest]:.2f})",
+                reasoning=(
+                    f"fallback: halve {riskiest} (vol={high_vol[riskiest]:.2f}) "
+                    "to reduce stress-scenario exposure"
+                ),
             )
 
-    # 3. Portfolio vol still too high: reduce largest risk contributor
-    port_vol = sum(
-        obs.holdings[t] ** 2 * obs.volatilities[t] ** 2
-        for t in obs.holdings
-    ) ** 0.5
+    # 4. Portfolio vol too high: reduce largest risk contributor
+    port_var = sum(w[i] * w[j] * v[i] * v[j] * c[i][j] for i in tickers for j in tickers)
+    port_vol = max(0.0, port_var) ** 0.5
     if port_vol > max_vol:
-        risk_contrib = {t: obs.holdings[t] * obs.volatilities[t] for t in obs.holdings}
-        worst = max(risk_contrib, key=lambda t: risk_contrib[t])
-        new_w = round(obs.holdings[worst] * 0.7, 4)
-        new_w = max(0.01, min(max_w, new_w))
+        rc = {t: w[t] * sum(w[t2] * v[t] * v[t2] * c[t][t2] for t2 in tickers) for t in tickers}
+        worst = max(rc, key=lambda t: rc[t])
+        new_w = round(max(0.01, min(max_w, w[worst] * 0.7)), 4)
         return PortfolioAction(
             action_type="rebalance",
             ticker=worst,
             target_weight=new_w,
-            reasoning=f"fallback: reduce risk contributor {worst}",
+            reasoning=(
+                f"fallback: reduce {worst} to lower portfolio volatility "
+                f"from {port_vol:.2f} toward target {max_vol:.2f}"
+            ),
         )
 
-    return PortfolioAction(action_type="hold", reasoning="fallback: portfolio compliant")
+    return PortfolioAction(
+        action_type="hold",
+        reasoning="fallback: all constraints satisfied; portfolio is compliant",
+    )
 
 
-# ── Helper: sanitise / clamp an LLM-produced action ───────────────────────────
 def _safe_action(action: PortfolioAction, obs: PortfolioObservation) -> PortfolioAction:
-    """
-    Clamp values and validate ticker so we never send an invalid action to env.step().
-    Returns the original action (possibly fixed) or falls back to _fallback_policy.
-    """
+    """Validate and clamp LLM output."""
     try:
         if action.action_type == "rebalance":
-            # ticker must exist
             if not action.ticker or action.ticker not in obs.holdings:
                 return _fallback_policy(obs)
-
-            # target_weight must be present and in range
             if action.target_weight is None:
                 return _fallback_policy(obs)
-
             max_w = obs.constraints.get("max_single_weight", 0.35)
             action.target_weight = round(max(0.01, min(max_w, action.target_weight)), 4)
 
@@ -156,16 +191,15 @@ def _safe_action(action: PortfolioAction, obs: PortfolioObservation) -> Portfoli
                 return _fallback_policy(obs)
 
         return action
-
     except Exception:
         return _fallback_policy(obs)
 
 
-# ── Helper: parse raw LLM text into a PortfolioAction ─────────────────────────
 def _parse_action(raw: str, obs: PortfolioObservation) -> PortfolioAction:
+    """Extract PortfolioAction from LLM text."""
     text = raw.strip()
 
-    # Strip markdown fences
+    # Strip markdown fences if present
     if "```" in text:
         for part in text.split("```"):
             part = part.strip().lstrip("json").strip()
@@ -173,10 +207,9 @@ def _parse_action(raw: str, obs: PortfolioObservation) -> PortfolioAction:
                 text = part
                 break
 
-    # Find JSON object anywhere in the text
-    start = text.find("{")
-    end   = text.rfind("}")
-    if start != -1 and end != -1 and end > start:
+    # Extract first JSON object
+    start, end = text.find("{"), text.rfind("}")
+    if start != -1 and end > start:
         text = text[start : end + 1]
 
     try:
@@ -187,12 +220,11 @@ def _parse_action(raw: str, obs: PortfolioObservation) -> PortfolioAction:
         return _fallback_policy(obs)
 
 
-# ── Main task runner ───────────────────────────────────────────────────────────
 def run_task(task_name: str) -> None:
-    env       = PortfolioRiskEnv(task=task_name)
-    obs       = env.reset()
-    rewards   = []
-    step_num  = 0
+    env         = PortfolioRiskEnv(task=task_name)
+    obs         = env.reset()
+    rewards     = []
+    step_num    = 0
     final_score = 0.0
 
     print(f"[START] task={task_name} env={BENCHMARK} model={MODEL_NAME}", flush=True)
@@ -200,41 +232,41 @@ def run_task(task_name: str) -> None:
     try:
         while True:
 
-            # ── Optimisation: skip LLM when already compliant ──────────────
             if _is_compliant(obs):
-                action = PortfolioAction(action_type="hold", reasoning="pre-check: compliant")
+                action = PortfolioAction(
+                    action_type="hold",
+                    reasoning="pre-check: all constraints satisfied; portfolio is compliant",
+                )
             else:
-                # ── Call LLM with timeout ──────────────────────────────────
                 prompt = (
                     f"Portfolio state:\n"
                     f"{json.dumps(obs.model_dump(), indent=2)}\n\n"
+                    f"Previous rewards (last steps): {obs.previous_rewards}\n"
+                    f"Current market regime: {obs.regime}\n\n"
                     f"What single action do you take? Respond with JSON only."
                 )
                 try:
-                    response = client.chat.completions.create(
+                    resp = client.chat.completions.create(
                         model=MODEL_NAME,
                         messages=[
                             {"role": "system", "content": SYSTEM_PROMPT},
                             {"role": "user",   "content": prompt},
                         ],
-                        max_tokens=300,
-                        temperature=0.0,   # fully deterministic
-                        timeout=10,        # never hang
+                        max_tokens=350,
+                        temperature=0.0,
+                        timeout=10,
                     )
-                    raw    = response.choices[0].message.content or ""
+                    raw    = resp.choices[0].message.content or ""
                     action = _parse_action(raw, obs)
-                except Exception as api_err:
-                    # API failed → use deterministic fallback instead of crashing
+                except Exception:
                     action = _fallback_policy(obs)
-                    _ = str(api_err)  # logged implicitly via error field below
 
-            # ── Step the environment ───────────────────────────────────────
             obs, reward, done, info = env.step(action)
-            step_num += 1
+            step_num    += 1
             rewards.append(reward)
-            final_score = reward
+            final_score  = reward
 
-            error_str  = obs.last_action_error if obs.last_action_error else "null"
+            error_str  = obs.last_action_error or "null"
             action_str = action.action_type
             if action.ticker:
                 tw = f"{action.target_weight:.2f}" if action.target_weight is not None else "?"
@@ -249,11 +281,11 @@ def run_task(task_name: str) -> None:
             if done:
                 break
 
-    except Exception as ex:
+    except Exception as exc:
         step_num += 1
         print(
             f"[STEP] step={step_num} action=error "
-            f"reward=0.00 done=true error={str(ex)[:100]}",
+            f"reward=0.00 done=true error={str(exc)[:100]}",
             flush=True,
         )
         final_score = 0.0

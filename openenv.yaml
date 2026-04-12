@@ -1,13 +1,28 @@
 name: portfolio-risk-advisor
 version: "1.0.0"
-description: "An RL environment where an AI agent manages and rebalances a stock portfolio under risk constraints."
-tags: [openenv, finance, portfolio, risk-management]
+description: "An RL environment where an AI agent manages and rebalances a stock portfolio under risk constraints, including a dynamic market-regime shift task."
+tags:
+  - openenv
+  - finance
+  - portfolio
+  - risk-management
+entry_point: "portfolio_risk_env_environment:PortfolioRiskEnvironment"
 tasks:
   - name: allocation_check
     difficulty: easy
+    max_steps: 5
+    description: "Ensure no single asset exceeds 35% portfolio weight."
   - name: risk_rebalancing
     difficulty: medium
+    max_steps: 10
+    description: "Reduce full-covariance portfolio volatility below 25% while satisfying weight constraints."
   - name: stress_test_optimization
     difficulty: hard
+    max_steps: 15
+    description: "Minimize correlated market-shock losses while satisfying all constraints."
+  - name: regime_shift_adaptation
+    difficulty: hard+
+    max_steps: 20
+    description: "Adapt portfolio dynamically when market shifts from normal to crisis regime mid-episode."
 action_space: text
 observation_space: structured
