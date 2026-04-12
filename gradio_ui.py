@@ -275,13 +275,7 @@ def on_step(
 
 
 def create_demo() -> gr.Blocks:
-    css = """
-    .header-box { text-align: center; padding: 1rem 0 0.5rem 0; }
-    .task-badge { font-size: 0.85rem; font-weight: 600; }
-    .metric-table td { font-family: monospace; }
-    """
-    
-    with gr.Blocks(title="Portfolio Risk Advisor", css=css) as demo:
+    with gr.Blocks(title="Portfolio Risk Advisor") as demo:
 
         state = gr.State({"env": None, "obs": None, "rewards": [], "log": [], "done": False})
 
